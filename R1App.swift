@@ -33,11 +33,13 @@ struct R1ConfigApp: App {
 final class Model: ObservableObject {
     @Published var battery = "—"
     @Published var connected = false
-    @Published var status = "Mexa o mouse antes de aplicar: parado, ele dorme e não recebe a configuração."
+    @Published var status = readyMessage
     @Published var statusIsError = false
     @Published var busy = false
+    var refreshing = false
 }
 
+let readyMessage = "Mexa o mouse antes de aplicar: parado, ele dorme e não recebe a configuração."
 let bluetoothMessage = "O mouse está no Bluetooth, que não aceita configuração. Mude a chave para 2.4G (ou ligue o cabo), aplique, e volte ao Bluetooth: as configurações continuam valendo."
 let notFoundMessage = "Mouse não encontrado. Use o dongle 2.4G ou o cabo: pelo Bluetooth o R1 não aceita configuração, mas o que você aplicar por aqui continua valendo no Bluetooth."
 
@@ -95,6 +97,8 @@ struct ContentView: View {
         .background(backgroundColor)
         .tint(green)
         .onAppear(perform: refreshBattery)
+        // Switching the mouse between 2.4G and Bluetooth changes nothing the app would otherwise notice.
+        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in checkMode() }
     }
 
     private var header: some View {
@@ -205,16 +209,37 @@ struct ContentView: View {
 
     // MARK: - Actions
 
+    private func checkMode() {
+        hidQueue.async {
+            let bluetooth = isOnBluetooth()
+            DispatchQueue.main.async {
+                if bluetooth && model.connected {
+                    model.connected = false
+                    model.battery = "—"
+                    show(bluetoothMessage, error: true)
+                } else if !bluetooth && !model.connected && !model.busy && !model.refreshing {
+                    refreshBattery() // back on 2.4G or cable: reconnect and clear the warning
+                }
+            }
+        }
+    }
+
     private func refreshBattery() {
+        model.refreshing = true
         hidQueue.async {
             let result = Result { () -> String in
                 let (device, wired) = try openMouse()
-                guard let b = try readBattery(device, wired: wired) else { return "cabo" }
+                // A sleeping mouse sends no battery report; that's still a working connection.
+                guard let b = (try? readBattery(device, wired: wired)) ?? nil else { return wired ? "cabo" : "—" }
                 return "\(b.percent)%\(b.charging ? " ⚡︎" : "")"
             }
             DispatchQueue.main.async {
+                model.refreshing = false
                 switch result {
-                case .success(let text): model.battery = text; model.connected = true
+                case .success(let text):
+                    if !model.connected { show(readyMessage, error: false) }
+                    model.battery = text
+                    model.connected = true
                 case .failure(let error):
                     model.connected = false
                     model.battery = "—"

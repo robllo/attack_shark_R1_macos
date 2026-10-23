@@ -157,6 +157,18 @@ struct R1Error: LocalizedError {
     var errorDescription: String? { message }
 }
 
+// On Bluetooth the R1 shows up as "AttackSharkR1" (it borrows a Microsoft VID/PID). The dongle stays enumerated and
+// even answers battery reads then, but writes sent through it never reach the mouse. Cheap: lists devices, opens none.
+// Filtered by hand: a Product key in the matching dictionary is ignored and every HID device comes back.
+func isOnBluetooth() -> Bool {
+    let all = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+    IOHIDManagerSetDeviceMatching(all, nil)
+    return ((IOHIDManagerCopyDevices(all) as? Set<IOHIDDevice>) ?? []).contains { d in
+        IOHIDDeviceGetProperty(d, kIOHIDProductKey as CFString) as? String == "AttackSharkR1" &&
+            (IOHIDDeviceGetProperty(d, kIOHIDTransportKey as CFString) as? String ?? "").contains("Bluetooth")
+    }
+}
+
 // The R1 config interface is USB interface 2, which macOS exposes as Generic Desktop / System Control (0x80).
 // Usage 0x02 (Mouse) is the pointer interface, used only to measure the real report rate.
 func openMouse(usage: Int = 0x80) throws -> (IOHIDDevice, wired: Bool) {
@@ -165,16 +177,7 @@ func openMouse(usage: Int = 0x80) throws -> (IOHIDDevice, wired: Bool) {
         [kIOHIDVendorIDKey: vendorID, kIOHIDProductIDKey: pid,
          kIOHIDPrimaryUsagePageKey: 0x01, kIOHIDPrimaryUsageKey: usage] as CFDictionary
     }
-    // On Bluetooth the R1 shows up as "AttackSharkR1" (it borrows a Microsoft VID/PID). The dongle stays enumerated and
-    // even answers battery reads then, but writes sent through it never reach the mouse.
-    // Filtered by hand: a Product key in the matching dictionary is ignored and every HID device comes back.
-    let all = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-    IOHIDManagerSetDeviceMatching(all, nil)
-    let onBluetooth = ((IOHIDManagerCopyDevices(all) as? Set<IOHIDDevice>) ?? []).contains { d in
-        IOHIDDeviceGetProperty(d, kIOHIDProductKey as CFString) as? String == "AttackSharkR1" &&
-            (IOHIDDeviceGetProperty(d, kIOHIDTransportKey as CFString) as? String ?? "").contains("Bluetooth")
-    }
-    if onBluetooth {
+    if isOnBluetooth() {
         throw R1Error(message: "the mouse is in Bluetooth mode, which has no configuration channel; switch it to 2.4G or plug the cable to configure (settings then apply on Bluetooth too)")
     }
     IOHIDManagerSetDeviceMatchingMultiple(manager, matches as CFArray)
