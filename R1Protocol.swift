@@ -216,6 +216,11 @@ func readBattery(_ device: IOHIDDevice, wired: Bool) throws -> (percent: Int, ch
     let deadline = Date().addingTimeInterval(6)
     while lastBattery == nil && Date() < deadline { CFRunLoopRunInMode(.defaultMode, 0.2, true) }
     guard let r = lastBattery else { throw R1Error(message: "no battery report within 6 s; move the mouse so it wakes up and retry") }
+    return parseBattery(r)
+}
+
+// Input report 0x03 (at least 5 bytes). The dongle sends one every ~2 s while the mouse is on, and none while it's off.
+func parseBattery(_ r: [UInt8]) -> (percent: Int, charging: Bool) {
     let raw = r[4]
     let percent = raw <= 10 ? Int(raw) * 10 : min(Int(raw), 100) // firmware sends tenths or a percentage
     let charging = [0x02, 0x03, 0x80].contains(r[3]) || r.dropFirst(5).contains { $0 != 0 }

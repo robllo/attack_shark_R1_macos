@@ -29,18 +29,26 @@ struct R1ConfigApp: App {
     }
 }
 
+enum Link { case checking, ready, off, bluetooth, missing }
+
 // Transient UI state; @State is a macro that needs full Xcode, so this builds with the command-line tools alone.
 final class Model: ObservableObject {
     @Published var battery = "—"
-    @Published var connected = false
+    @Published var link = Link.checking
     @Published var status = readyMessage
     @Published var statusIsError = false
     @Published var busy = false
-    var refreshing = false
+    // The dongle/cable config interface the app listens on, and when it last heard a battery report from the mouse.
+    var monitor: IOHIDDevice?
+    var wired = false
+    var monitorStarted = Date.distantPast
+    var lastReport = Date.distantPast
+    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
 }
 
 let readyMessage = "Mexa o mouse antes de aplicar: parado, ele dorme e não recebe a configuração."
 let bluetoothMessage = "O mouse está no Bluetooth, que não aceita configuração. Mude a chave para 2.4G (ou ligue o cabo), aplique, e volte ao Bluetooth: as configurações continuam valendo."
+let offMessage = "O mouse parece desligado (ou em repouso profundo). Ligue-o ou mexa nele para configurar."
 let notFoundMessage = "Mouse não encontrado. Use o dongle 2.4G ou o cabo: pelo Bluetooth o R1 não aceita configuração, mas o que você aplicar por aqui continua valendo no Bluetooth."
 
 // All HID work runs on one serial queue so writes never interleave and the UI never blocks.
@@ -96,30 +104,48 @@ struct ContentView: View {
         .frame(width: 520, height: 820)
         .background(backgroundColor)
         .tint(green)
-        .onAppear(perform: refreshBattery)
-        // Switching the mouse between 2.4G and Bluetooth changes nothing the app would otherwise notice.
-        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in checkMode() }
+        .onAppear(perform: tick)
+        // Power and mode changes (off, Bluetooth, 2.4G) send the app nothing, so it re-checks on a timer.
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in tick() }
     }
 
     private var header: some View {
         HStack(spacing: 12) {
-            Circle().fill(model.connected ? green : orange).frame(width: 10, height: 10)
-                .accessibilityLabel(model.connected ? "Conectado" : "Não encontrado")
+            Circle().fill(linkColor).frame(width: 10, height: 10)
+                .accessibilityLabel(linkText)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Attack Shark R1").font(.title2.bold())
-                Text(model.connected ? "Conectado" : "Sem conexão para configurar").font(.caption).foregroundStyle(.secondary)
+                Text(linkText).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             Label(model.battery, systemImage: "battery.75percent")
                 .font(.headline.monospacedDigit())
                 .foregroundStyle(green)
-            Button(action: refreshBattery) { Image(systemName: "arrow.clockwise") }
+            Button(action: tick) { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.borderless)
-                .help("Ler bateria de novo")
-                .accessibilityLabel("Atualizar bateria")
+                .help("Verificar a conexão agora")
+                .accessibilityLabel("Verificar conexão")
         }
         .padding(16)
         .background(cardColor, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var linkText: String {
+        switch model.link {
+        case .checking: return "Verificando…"
+        case .ready: return "Conectado"
+        case .off: return "Desligado"
+        case .bluetooth: return "No Bluetooth (sem configuração)"
+        case .missing: return "Dongle ou cabo não encontrado"
+        }
+    }
+
+    private var linkColor: Color {
+        switch model.link {
+        case .ready: return green
+        case .off, .checking: return .secondary
+        case .bluetooth, .missing: return orange
+        }
     }
 
     private var dpiCard: some View {
@@ -209,44 +235,54 @@ struct ContentView: View {
 
     // MARK: - Actions
 
-    private func checkMode() {
-        hidQueue.async {
-            let bluetooth = isOnBluetooth()
-            DispatchQueue.main.async {
-                if bluetooth && model.connected {
-                    model.connected = false
-                    model.battery = "—"
-                    show(bluetoothMessage, error: true)
-                } else if !bluetooth && !model.connected && !model.busy && !model.refreshing {
-                    refreshBattery() // back on 2.4G or cable: reconnect and clear the warning
-                }
+    private func tick() {
+        let link: Link
+        if isOnBluetooth() {
+            link = .bluetooth
+        } else {
+            if model.monitor == nil { startMonitor() }
+            if model.monitor == nil {
+                link = .missing
+            } else if model.wired {
+                link = .ready // the cable powers the mouse and sends no battery reports
+            } else {
+                // The dongle relays a battery report every ~2 s while the mouse is on and goes silent when it's off.
+                let heard = model.lastReport > model.monitorStarted
+                let quiet = Date().timeIntervalSince(max(model.lastReport, model.monitorStarted)) > 5
+                link = quiet ? .off : (heard ? .ready : .checking)
             }
+        }
+        guard link != model.link else { return }
+        model.link = link
+        switch link {
+        case .ready: show(readyMessage, error: false)
+        case .checking: break
+        case .off: model.battery = "—"; show(offMessage, error: true)
+        case .bluetooth: model.battery = "—"; show(bluetoothMessage, error: true)
+        case .missing: model.battery = "—"; show(notFoundMessage, error: true)
         }
     }
 
-    private func refreshBattery() {
-        model.refreshing = true
-        hidQueue.async {
-            let result = Result { () -> String in
-                let (device, wired) = try openMouse()
-                // A sleeping mouse sends no battery report; that's still a working connection.
-                guard let b = (try? readBattery(device, wired: wired)) ?? nil else { return wired ? "cabo" : "—" }
-                return "\(b.percent)%\(b.charging ? " ⚡︎" : "")"
-            }
-            DispatchQueue.main.async {
-                model.refreshing = false
-                switch result {
-                case .success(let text):
-                    if !model.connected { show(readyMessage, error: false) }
-                    model.battery = text
-                    model.connected = true
-                case .failure(let error):
-                    model.connected = false
-                    model.battery = "—"
-                    show(friendly(error), error: true)
-                }
-            }
-        }
+    // Listens on the main run loop for the dongle's battery reports for as long as the receiver stays plugged in.
+    private func startMonitor() {
+        guard let (device, wired) = try? openMouse() else { return }
+        let context = Unmanaged.passUnretained(model).toOpaque()
+        IOHIDDeviceRegisterInputReportCallback(device, model.buffer, 64, { context, _, _, _, reportID, report, length in
+            guard reportID == 0x03, length >= 5, let context else { return }
+            let model = Unmanaged<Model>.fromOpaque(context).takeUnretainedValue()
+            let b = parseBattery(Array(UnsafeBufferPointer(start: report, count: length)))
+            model.lastReport = Date()
+            model.battery = "\(b.percent)%\(b.charging ? " ⚡︎" : "")"
+        }, context)
+        IOHIDDeviceRegisterRemovalCallback(device, { context, _, _ in
+            guard let context else { return }
+            Unmanaged<Model>.fromOpaque(context).takeUnretainedValue().monitor = nil
+        }, context)
+        IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        model.monitor = device
+        model.wired = wired
+        model.monitorStarted = Date()
+        if wired { model.battery = "cabo" }
     }
 
     private func applyDPI() {
@@ -274,13 +310,19 @@ struct ContentView: View {
     }
 
     private func write(_ report: [UInt8], done: String) {
+        // Writes sent while the mouse is off or on Bluetooth are accepted by the dongle and silently lost.
+        guard model.link == .ready else {
+            let reason: [Link: String] = [.off: offMessage, .bluetooth: bluetoothMessage, .missing: notFoundMessage,
+                                          .checking: "Ainda verificando a conexão com o mouse. Tente de novo em instantes."]
+            return show(reason[model.link]!, error: true)
+        }
         model.busy = true
         hidQueue.async {
             let result = Result { try send(openMouse().0, report) }
             DispatchQueue.main.async {
                 model.busy = false
                 switch result {
-                case .success: show(done, error: false); model.connected = true
+                case .success: show(done, error: false)
                 case .failure(let error):
                     show(friendly(error), error: true)
                 }
@@ -290,8 +332,8 @@ struct ContentView: View {
 
     private func friendly(_ error: Error) -> String {
         let text = error.localizedDescription
-        if text.contains("Bluetooth mode") { model.connected = false; return bluetoothMessage }
-        if text.contains("not found") { model.connected = false; return notFoundMessage }
+        if text.contains("Bluetooth mode") { return bluetoothMessage }
+        if text.contains("not found") { return notFoundMessage }
         return text
     }
 
