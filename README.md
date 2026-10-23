@@ -2,7 +2,7 @@
 
 Configure the Attack Shark R1 mouse on macOS without the vendor's Windows software: a small `r1` command-line tool and a native SwiftUI app, **R1 Config**. It talks to the mouse over IOKit HID and needs nothing beyond the Xcode command-line tools.
 
-Unofficial and not affiliated with Attack Shark.
+Unofficial and not affiliated with Attack Shark. The app icon is based on the Attack Shark logo, which belongs to its owner and is not covered by this project's license.
 
 ## What it does
 
@@ -21,7 +21,7 @@ xcode-select --install   # once, if the command-line tools are missing
 ./build.sh
 ```
 
-This builds `./r1` and `R1 Config.app` and copies the app to `/Applications`. To give the app an icon, put a square `icon.png` (1024×1024 is best) next to `build.sh` before building.
+This builds `./r1` and `R1 Config.app` and copies the app to `/Applications`. The app icon comes from `icon.png`; replace it with any square image (1024×1024 is best) to change it.
 
 ## Command line
 
