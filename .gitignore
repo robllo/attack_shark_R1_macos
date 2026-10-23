@@ -1,0 +1,4 @@
+# Build outputs (./build.sh)
+/r1
+/R1 Config.app/
+.DS_Store
